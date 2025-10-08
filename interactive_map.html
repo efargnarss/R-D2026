@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interactive Map — OSM / Google, load raster & shapefiles, WMS/WMTS, tiled COG</title>
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet-Geoman for drawing & measuring -->
+  <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.15.0/dist/leaflet-geoman.css" />
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.15.0/dist/leaflet-geoman.min.js"></script>
+
+  <!-- Leaflet.Control.Geocoder (search) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+  <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+
+  <!-- shp.js for Shapefile (zip) -> GeoJSON -->
+  <script src="https://unpkg.com/shpjs@latest/dist/shp.min.js"></script>
+
+  <!-- georaster + georaster-layer-for-leaflet to display GeoTIFFs in browser -->
+  <script src="https://unpkg.com/georaster/dist/georaster.browserify.min.js"></script>
+  <script src="https://unpkg.com/georaster-layer-for-leaflet/dist/georaster-layer-for-leaflet.browserify.min.js"></script>
+
+  <!-- leaflet.gridlayer.googlemutant for Google basemaps (requires Google Maps API key) -->
+  <script src="https://unpkg.com/leaflet.gridlayer.googlemutant@0.11.2/Leaflet.GoogleMutant.js"></script>
+
+  <style>
+    html,body,#map { height: 100%; margin:0; padding:0; }
+    .panel{
+      position: absolute; z-index:1001; right:10px; top:10px; width:320px; min-width:200px; resize:both; overflow:auto;
+      background:rgba(255,255,255,0.98); padding:12px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.15);
+      font-family: Arial, Helvetica, sans-serif; font-size:13px;
+    }
+    .panel h3{margin:4px 0 8px 0; font-size:16px}
+    .row{display:flex; gap:8px; margin-bottom:8px}
+    .btn{flex:1; display:inline-block; padding:7px 8px; border-radius:6px; cursor:pointer; background:#1978c8; color:white; text-align:center}
+    .btn.alt{background:#444}
+    input[type=file]{display:none}
+    label.filelabel{display:inline-block; padding:7px 8px; border-radius:6px; background:#1978c8; color:#fff; cursor:pointer}
+    select,input,button{font-size:13px}
+    .small{font-size:12px;color:#444}
+    .footer{margin-top:8px;font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="panel" id="panel">
+  <h3>Interactive Map Controls</h3>
+  <div class="row">
+    <label class="filelabel" id="lblRaster">Load GeoTIFF</label>
+    <input id="fileRaster" type="file" accept=".tif,.tiff" />
+  </div>
+  <div class="row">
+    <label class="filelabel" id="lblShp">Load Shapefile (.zip) / GeoJSON</label>
+    <input id="fileShp" type="file" accept=".zip,.geojson,.json" />
+  </div>
+
+  <div class="row">
+    <button class="btn" id="btnWMS">Add WMS/WMTS</button>
+    <button class="btn alt" id="btnXYZ">Add XYZ/Tile</button>
+  </div>
+
+  <div style="margin-bottom:6px">
+    <label for="baselayer">Base layer:</label>
+    <select id="baselayer">
+      <option value="osm">OpenStreetMap</option>
+      <option value="esri">Esri.WorldImagery</option>
+      <option value="google">Google (requires API key)</option>
+    </select>
+  </div>
+
+  <div style="margin-bottom:6px">
+    <label for="googleKey">Google Maps API Key (paste here if using Google):</label>
+    <input id="googleKey" placeholder="YOUR_GOOGLE_API_KEY" style="width:100%" />
+  </div>
+
+  <div style="display:flex; gap:8px; margin-bottom:6px">
+    <button class="btn" id="btnClear">Clear Layers</button>
+    <button class="btn alt" id="btnExport">Export Vectors</button>
+  </div>
+
+  <div class="small">Draw & measure tools available on top-left (use the ruler/pencil). Search (geocoder) is available on the map.</div>
+  <div class="footer">Tips: For large GeoTIFFs use tiled COGs or WMS servers. Google basemap requires a valid API key and may have usage costs.</div>
+</div>
+
+<script>
+  // --- Map initialization ---
+  const map = L.map('map', { zoomControl: true, center: [30.0444, 31.2357], zoom: 6 });
+
+  // Base layers
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  const esri = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles © Esri' });
+  // GoogleMutant placeholder (not added until API key supplied)
+  let googleMutant = null;
+
+  const baseLayers = { 'OpenStreetMap': osm, 'Esri.WorldImagery': esri };
+  const baseControl = L.control.layers(baseLayers, null).addTo(map);
+
+  // Geocoder (search)
+  L.Control.geocoder({ defaultMarkGeocode: true }).addTo(map);
+
+  // Geoman (draw + measure)
+  map.pm.addControls({ position: 'topleft', drawCircle: false, drawMarker: true, drawPolygon: true, drawPolyline: true, drawRectangle: true, editMode: true, dragMode: true, cutPolygon: true });
+
+  // Layer groups
+  const rasterLayerGroup = L.layerGroup().addTo(map);
+  const vectorLayerGroup = L.layerGroup().addTo(map);
+
+  // File inputs
+  const fileRaster = document.getElementById('fileRaster');
+  const fileShp = document.getElementById('fileShp');
+  const lblRaster = document.getElementById('lblRaster');
+  const lblShp = document.getElementById('lblShp');
+  const baseselect = document.getElementById('baselayer');
+  const googleKeyInput = document.getElementById('googleKey');
+
+  lblRaster.addEventListener('click', () => fileRaster.click());
+  lblShp.addEventListener('click', () => fileShp.click());
+
+  // Handle base layer switching
+  baseselect.addEventListener('change', (e) => {
+    const v = e.target.value;
+    osm.remove(); esri.remove(); if (googleMutant) googleMutant.remove();
+    if (v === 'osm') osm.addTo(map);
+    else if (v === 'esri') esri.addTo(map);
+    else if (v === 'google') {
+      const key = googleKeyInput.value.trim();
+      if (!key) { alert('Please paste your Google Maps API key above then choose Google.'); baseselect.value='osm'; return; }
+      // Load Google Maps script dynamically (if not loaded)
+      if (!window.google || !window.google.maps) {
+        const s = document.createElement('script');
+        s.src = `https://maps.googleapis.com/maps/api/js?key=${key}`;
+        s.onload = () => { addGoogleMutant(); };
+        s.onerror = () => alert('Failed to load Google Maps JS. Check your API key and network.');
+        document.head.appendChild(s);
+      } else addGoogleMutant();
+    }
+  });
+
+  function addGoogleMutant(){
+    if (googleMutant) googleMutant.addTo(map);
+    else {
+      googleMutant = L.gridLayer.googleMutant({ type: 'roadmap' });
+      googleMutant.addTo(map);
+      baseControl.addBaseLayer(googleMutant, 'Google Roads');
+    }
+  }
+
+  // Clear layers
+  document.getElementById('btnClear').addEventListener('click', () => {
+    rasterLayerGroup.clearLayers();
+    vectorLayerGroup.clearLayers();
+  });
+
+  // Export vector features as GeoJSON
+  document.getElementById('btnExport').addEventListener('click', () => {
+    const all = [];
+    vectorLayerGroup.eachLayer(l => { all.push(l.toGeoJSON()); });
+    if (!all.length) { alert('No vector layers to export'); return; }
+    const fc = { type: 'FeatureCollection', features: all.flatMap(f => f.type === 'FeatureCollection' ? f.features : [f]) };
+    const blob = new Blob([JSON.stringify(fc)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'export_vectors.geojson'; a.click(); URL.revokeObjectURL(url);
+  });
+
+  // Drag & drop files onto map
+  ['dragenter','dragover','dragleave','drop'].forEach(evtName => document.addEventListener(evtName, e => e.preventDefault()));
+  document.addEventListener('drop', (e) => { const files = e.dataTransfer.files; if (files.length) handleFiles(files); });
+
+  fileRaster.addEventListener('change', async (e) => { if (e.target.files.length) await loadGeoTiffFile(e.target.files[0]); e.target.value=''; });
+  fileShp.addEventListener('change', async (e) => { if (e.target.files.length) await loadShapefileOrGeoJSON(e.target.files[0]); e.target.value=''; });
+
+  function handleFiles(files){ for (let i=0;i<files.length;i++){ const f = files[i]; const n=f.name.toLowerCase(); if (n.endsWith('.tif')||n.endsWith('.tiff')) loadGeoTiffFile(f); else if (n.endsWith('.zip')||n.endsWith('.geojson')||n.endsWith('.json')) loadShapefileOrGeoJSON(f); else alert('Unsupported file: '+f.name); }}
+
+  // --- GeoTIFF loader (browser) ---
+  async function loadGeoTiffFile(file){
+    try{
+      const ab = await file.arrayBuffer();
+      const geor = await georaster(ab);
+      const layer = new GeoRasterLayer({ georaster: geor, opacity: 0.8, resolution: 256 });
+      rasterLayerGroup.addLayer(layer);
+      layer.addTo(map);
+      map.fitBounds(layer.getBounds());
+    } catch(err){ console.error(err); alert('Error loading GeoTIFF (browser). For large rasters use tiled COG or WMS/WMTS.'); }
+  }
+
+  // --- Shapefile or GeoJSON loader ---
+  async function loadShapefileOrGeoJSON(file){
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.zip')){
+      try{ const ab = await file.arrayBuffer(); const geojson = await shp(ab); addGeoJSONToMap(geojson, file.name); } catch(err){ console.error(err); alert('Error reading shapefile: '+err); }
+    } else {
+      try{ const txt = await file.text(); const geojson = JSON.parse(txt); addGeoJSONToMap(geojson, file.name); } catch(err){ console.error(err); alert('Error reading GeoJSON: '+err); }
+    }
+  }
+
+  function addGeoJSONToMap(geojson, title){
+    const gj = L.geoJSON(geojson, {
+      onEachFeature(feature, layer){ const props = feature.properties || {}; let popup = `<b>${title}</b><br><pre>${JSON.stringify(props,null,2)}</pre>`; layer.bindPopup(popup); },
+      pointToLayer(feature, latlng){ return L.circleMarker(latlng, { radius:6, fillOpacity:0.9 }); }
+    }).addTo(vectorLayerGroup);
+    map.fitBounds(gj.getBounds());
+  }
+
+  // --- Add WMS/WMTS or XYZ Tile ---
+  document.getElementById('btnWMS').addEventListener('click', () => {
+    const url = prompt('Enter WMS (GetMap) endpoint URL (e.g. https://.../wms):'); if (!url) return;
+    const layers = prompt('Enter layer name(s) (comma separated):'); if (!layers) return;
+    const wms = L.tileLayer.wms(url, { layers: layers, format: 'image/png', transparent: true, version: '1.3.0' });
+    rasterLayerGroup.addLayer(wms); wms.addTo(map);
+  });
+
+  document.getElementById('btnXYZ').addEventListener('click', () => {
+    const url = prompt('Enter tile URL template (e.g. https://.../{z}/{x}/{y}.png):'); if (!url) return;
+    const t = L.tileLayer(url, { maxZoom: 22, tms: false }); rasterLayerGroup.addLayer(t); t.addTo(map);
+  });
+
+  // --- Helpers for tiled Cloud Optimized GeoTIFFs (COG) ---
+  window.addCog = async function(url){
+    try{
+      const resp = await fetch(url); const ab = await resp.arrayBuffer(); const geor = await georaster(ab); const layer = new GeoRasterLayer({ georaster: geor, opacity:0.8, resolution:256 }); rasterLayerGroup.addLayer(layer); layer.addTo(map); map.fitBounds(layer.getBounds());
+    } catch(err){ console.error(err); alert('Failed to load COG directly. For large datasets use an XYZ tile service or a WMS with server-side tiling.'); }
+  };
+
+  // --- Misc: scale control ---
+  L.control.scale().addTo(map);
+
+  // Expose helper for power users
+  window.map = map; window.rasterLayerGroup = rasterLayerGroup; window.vectorLayerGroup = vectorLayerGroup;
+
+  // Autoresize when panel changes
+  const obs = new MutationObserver(()=> map.invalidateSize()); obs.observe(document.getElementById('panel'), { attributes:true, childList:true, subtree:true });
+</script>
+</body>
+</html>
